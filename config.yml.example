@@ -1,0 +1,15 @@
+aws:
+  access:
+    west:
+      region: [ "eu-west-1", "eu-west-2" ]
+      key: "AKXXXXXXXXXXXX"
+      pwd: "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+    china:
+      region: [ "cn-north-1" ]
+      key: "AKXXXXXXXXXXX"
+      pwd: "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+  filters:
+    status: ['running', 'starting']
+    tags:
+      Name: "test.*"
+

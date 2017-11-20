@@ -1,9 +1,0 @@
-aws:
-  key: "XXXXXXXXX"
-  pwd: "XXXXXXXXXX"
-
-filters:
-  tags:
-    - Name: "test.*"
-
-
