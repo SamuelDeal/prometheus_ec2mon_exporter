@@ -19,6 +19,7 @@ import os
 import Queue
 import threading
 import re
+import socket
 
 # Third-party libs
 from prometheus_client import start_http_server, Metric, REGISTRY, Gauge
@@ -31,7 +32,7 @@ DEFAULT_PORT = 9109
 
 
 # Custom Error
-class Ec2MonError(RuntimeError):
+class ExporterError(RuntimeError):
     pass
 
 
@@ -127,9 +128,14 @@ class Ec2Conn(threading.Thread):
                         return
                     if not self._status_filter.match(instance.state):
                         continue
-                    tags = {"zone": self.zone, "region": self.region}
-                    for tag, val in instance.__dict__['tags'].iteritems():
+                    instance_tags = instance.__dict__['tags']
+                    if not self._check_tags(instance_tags):
+                        continue
+                    tags = {"zone": self.zone, "region": self.region,
+                            "machine": instance.instance_type, "ami": instance.image_id}
+                    for tag, val in instance_tags.iteritems():
                         tags[tag] = val
+                    tags = dict((k, v) for k, v in tags.iteritems() if v is not None)
                     self._data_queue.put_nowait((1, tags))
                 if self._canceled:
                     return
@@ -141,6 +147,21 @@ class Ec2Conn(threading.Thread):
         finally:
             if conn:
                 conn.close()
+
+    def _check_tags(self, instance_tags):
+        """
+        Check if the instance is filtered
+        :param instance_tags:   The list of tags of the instance
+        :type instance_tags:    dict[str, str]
+        :return:                False if we should skip the instance
+        :rtype:                 bool
+        """
+        for tag, filter in self._tag_filters.iteritems():
+            if tag not in instance_tags.keys():
+                return False
+            if not filter.match(instance_tags[tag]):
+                return False
+        return True
 
     def _sleep(self, sleep_time):
         """
@@ -165,8 +186,9 @@ class Ec2Collector(object):
         :param conf:    The configuration of ec2
         :type conf:     dict
         """
-        super(Ec2Monitor, self).__init__()
+        super(Ec2Collector, self).__init__()
         self._conn = []
+        self._alive_metric = GaugeMetricFamily("ec2monitor_exporter_alive", "Ec2 Monitor Exporter Status", labels=['host'])
         self._metrics = {}
         for cloud in conf.keys():
             filter_conf = {}
@@ -174,7 +196,7 @@ class Ec2Collector(object):
                 filter_conf = conf[cloud]['filters']
 
             if 'access' not in conf[cloud].keys():
-                raise Ec2MonError("Invalid config for "+str(cloud)+" config: no 'access' defined")
+                raise ExporterError("Invalid config for "+str(cloud)+" config: no 'access' defined")
             if cloud == 'aws':
                 for zone in conf[cloud]['access'].keys():
                     aws_key = conf[cloud]['access'][zone]['key']
@@ -184,16 +206,31 @@ class Ec2Collector(object):
                         conn.start()
                         self._conn.append(conn)
             else:
-                raise Ec2MonError("Unknown cloud type '"+str(cloud)+"' in config file")
+                raise ExporterError("Unknown cloud type '"+str(cloud)+"' in config file")
+
+    def is_alive(self):
+        for conn in self._conn:
+            if conn.is_alive():
+                return True
+        return False
+
+    def loop(self):
+        """
+        wait for all thread to finish
+        """
+        while self.is_alive():
+            time.sleep(0.1)
 
     def collect(self):
         """
         get all the already collected metrics
         :yield:  GaugeMetricFamily
         """
+        self._alive_metric.add_metric([socket.getfqdn()], 1)
+        yield self._alive_metric
         for conn in self._conn:
             for val, tags in conn.get():
-                frozen_tags = frozenset(tags.items())
+                frozen_tags = frozenset(sorted(tags.items(), key=lambda y: y[0]))
                 if frozen_tags not in self._metrics.keys():
                     self._metrics[frozen_tags] = GaugeMetricFamily("ec2_number_instances",
                                                                    "Number of Aws EC2 instances",
@@ -232,23 +269,22 @@ def main(port, config_file=None):
             config_file = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.yml")
 
         if not os.path.exists(config_file):
-            raise Ec2MonError("Unable to load config file '"+str(config_file)+"'")
+            raise ExporterError("Unable to load config file '"+str(config_file)+"'")
 
         with open(config_file, "r") as cfg_fh:
             cfg_content = cfg_fh.read()
 
-        collector = Ec2Monitor(yaml.load(cfg_content))
+        collector = Ec2Collector(yaml.load(cfg_content))
         time.sleep(0.5)
         REGISTRY.register(collector)
         start_http_server(port)
-        while True:
-            time.sleep(0.1)
+        collector.loop()
     except KeyboardInterrupt:
         print ("\nExiting, please wait...")
         return 0
     except SystemExit:
         raise
-    except Ec2MonError as error:
+    except ExporterError as error:
         sys.stderr.write(error.message)
         sys.stderr.write("\n")
         sys.stderr.flush()
@@ -271,7 +307,7 @@ if __name__ == '__main__':
         print "\nExiting, please wait..."
     except SystemExit:
         pass
-    except Ec2MonError as e:
+    except ExporterError as e:
         sys.stderr.write(e.message)
         sys.stderr.write("\n")
         sys.stderr.flush()
